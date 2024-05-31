@@ -138,7 +138,7 @@ class Site(Base):
                 return self.bench_execute(
                     "--force restore "
                     f"--mariadb-root-username {mariadb_root_user} "
-                    f"--mariadb-root-password {mariadb_root_password} "
+                    f"--mariadb-root-password '{mariadb_root_password}' "
                     f"--admin-password {admin_password} "
                     f"{public_file_option} "
                     f"{private_file_option} "
@@ -221,7 +221,7 @@ class Site(Base):
                 return self.bench_execute(
                     f"reinstall --yes "
                     f"--mariadb-root-username {mariadb_root_user} "
-                    f"--mariadb-root-password {mariadb_root_password} "
+                    f"--mariadb-root-password '{mariadb_root_password}' "
                     f"--admin-password {admin_password}"
                 )
             except Exception:
