@@ -98,3 +98,21 @@ http {
 	include /etc/nginx/conf.d/*.conf;
 	include {{ conf_directory }};
 }
+
+{% if nats_stream_enabled %}
+# NATS (POS <-> HQ) TCP stream. External clients connect with TLS to a site's
+# domain on port {{ nats_port }}; we route by SNI to the local NATS server. The
+# per-bench map entries are generated next to each bench's nginx.conf.
+stream {
+	map $ssl_preread_server_name $nats_backend {
+		include {{ nats_stream_directory }};
+		default "";
+	}
+
+	server {
+		listen {{ nats_port }};
+		ssl_preread on;
+		proxy_pass $nats_backend;
+	}
+}
+{% endif %}

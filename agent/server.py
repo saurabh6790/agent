@@ -25,7 +25,7 @@ from agent.application_storage_analyzer import (
     to_bytes,
 )
 from agent.base import AgentException, Base
-from agent.bench import Bench
+from agent.bench import NATS_HOST_KEYSTORE, Bench
 from agent.exceptions import BenchNotExistsException, RegistryDownException
 from agent.job import Job, Step, job, step
 from agent.nfs_handler import NFSHandler
@@ -134,7 +134,10 @@ class Server(Base):
         common_site_config,
         registry,
         mounts=None,
+        nats=None,
     ):
+        # `nats` credentials are provisioned from the host keystore (see Bench.setup_nats),
+        # not from this payload; accept it so the request does not fail.
         self.docker_login(registry)
         self.bench_init(name, bench_config, registry)
         bench = Bench(name, self, mounts=mounts)
@@ -142,6 +145,7 @@ class Server(Base):
         if bench.bench_config.get("single_container"):
             bench.generate_supervisor_config()
         bench.deploy()
+        bench.setup_nats()
         bench.setup_nginx()
 
     def container_exists(self, name: str, max_retries: int = 3):
@@ -159,15 +163,10 @@ class Server(Base):
                 time.sleep(5)
 
     def get_image_size(self, image_tag: str):
+        grep_pattern = shlex.quote("^" + image_tag + " ")
+        command = f'docker image ls --format "{{{{.Tag}}}} {{{{.Size}}}}" | grep -E {grep_pattern}'
         try:
-            return (
-                to_bytes(
-                    self.execute(
-                        f'docker image ls --format "{{{{.Tag}}}} {{{{.Size}}}}" | grep -E {shlex.quote("^" + image_tag + " ")}'
-                    )["output"].split()[-1]
-                )
-                / 1024**3
-            )
+            return to_bytes(self.execute(command)["output"].split()[-1]) / 1024**3
         except AgentException:
             pass
 
@@ -1171,6 +1170,13 @@ class Server(Base):
                 "conf_directory": os.path.join(self.config.get("benches_directory"), "*", "nginx.conf"),
                 "ip_accept": self.config.get("ip_accept", []),
                 "ip_drop": self.config.get("ip_drop", []),
+                # The host keystore exists only after the `nats` role has run, which
+                # also installs the stream-module nginx — so it gates the stream block.
+                "nats_stream_enabled": os.path.isdir(NATS_HOST_KEYSTORE),
+                "nats_port": self.config.get("nats_port", 4222),
+                "nats_stream_directory": os.path.join(
+                    self.config.get("benches_directory"), "*", "nats.stream.conf"
+                ),
             },
             nginx_config,
         )

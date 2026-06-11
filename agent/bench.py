@@ -27,6 +27,12 @@ from agent.job import job, step
 from agent.site import Site
 from agent.utils import download_file, end_execution, get_execution_result, get_size
 
+# NATS keystore (operator/account/user nsc trust chain) is provisioned on the host
+# by the `nats` Ansible role. Each bench container gets a copy so sites can connect
+# to the host NATS server using the bench's own credentials.
+NATS_HOST_KEYSTORE = "/home/frappe/nats/keystore"
+NATS_CONTAINER_NSC_DIR = "/home/frappe/.local/share/nats/nsc"
+
 if TYPE_CHECKING:
     from agent.server import Server
 
@@ -70,6 +76,28 @@ class Bench(Base):
     @step("Deploy Bench")
     def deploy(self):
         return self.start()
+
+    @step("Setup NATS Keystore")
+    def setup_nats(self):
+        return self._setup_nats_keystore()
+
+    def _setup_nats_keystore(self):
+        """Copy the host NATS nsc keystore (keys + stores) into the bench container.
+
+        The container loses anything copied in when it is recreated, so this runs
+        after every (re)deploy. It is a no-op on servers where the `nats` role has
+        not provisioned the host keystore yet.
+        """
+        if not (self.bench_config.get("nats_enabled") and self.bench_config.get("single_container")):
+            return None
+
+        if not os.path.isdir(NATS_HOST_KEYSTORE):
+            return None
+
+        self.execute(f"docker exec -u 0 {self.name} mkdir -p {NATS_CONTAINER_NSC_DIR}")
+        for subdir in ("keys", "stores"):
+            self.execute(f"docker cp {NATS_HOST_KEYSTORE}/{subdir} {self.name}:{NATS_CONTAINER_NSC_DIR}/")
+        return self.execute(f"docker exec -u 0 {self.name} chown -R frappe:frappe {NATS_CONTAINER_NSC_DIR}")
 
     def dump(self):
         return {
@@ -553,6 +581,29 @@ class Bench(Base):
 
         self.server._render_template("bench/nginx.conf.jinja2", config, nginx_config)
 
+        self.generate_nats_stream_config(sites, domains)
+
+    def generate_nats_stream_config(self, sites, domains):
+        """Write SNI -> NATS map entries for this bench's sites.
+
+        The server's nginx stream block globs these in to route external POS/HQ
+        connections (TLS to the site's domain on the NATS port) to the local NATS
+        server. Cleared to empty when NATS is disabled so stale routes don't linger.
+        """
+        nats_stream_config = os.path.join(self.directory, "nats.stream.conf")
+
+        if not self.bench_config.get("nats_enabled"):
+            open(nats_stream_config, "w").close()
+            return
+
+        hosts = [site.name for site in sites] + list(domains.keys())
+        nats_port = self.bench_config.get("nats_port", 4222)
+        self.server._render_template(
+            "bench/nats.stream.conf.jinja2",
+            {"hosts": hosts, "nats_backend": f"127.0.0.1:{nats_port}"},
+            nats_stream_config,
+        )
+
     @step("Bench Disable Production")
     def disable_production(self):
         try:
@@ -666,7 +717,9 @@ class Bench(Base):
         return requires_deploy
 
     @job("Update Bench Configuration", priority="high")
-    def update_config_job(self, common_site_config, bench_config):
+    def update_config_job(self, common_site_config, bench_config, nats=None):
+        # `nats` credentials are provisioned from the host keystore (see setup_nats),
+        # not from this payload; accept it so the request does not fail.
         old_config = self.bench_config
         requires_update = self.update_config(common_site_config, bench_config)
         self.setup_nginx()
@@ -679,6 +732,7 @@ class Bench(Base):
                 or (old_config["socketio_port"] != bench_config["socketio_port"])
             ):
                 self.deploy()
+                self.setup_nats()
         else:
             self.generate_docker_compose_file()
             self.deploy()
